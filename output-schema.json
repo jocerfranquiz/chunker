@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/chunker-output.schema.json",
+  "title": "Chunker Output Records",
+  "description": "Output contract of the chunking tool, consumed by the embedding stage. The output is JSONL: one 'chunk' record per chunk, plus exactly one 'manifest' record per run written as the LAST line (it aggregates run statistics). Consumers must dispatch on 'record_type'. All character offsets are Python string indices (Unicode code points) into the 'text' field of the source PageRecord from the extraction schema.",
+  "oneOf": [
+    { "$ref": "#/$defs/ChunkRecord" },
+    { "$ref": "#/$defs/ManifestRecord" }
+  ],
+  "$defs": {
+
+    "SourceSpan": {
+      "type": "object",
+      "description": "A contiguous character range on one source page that contributed to this chunk. A single-page chunk has exactly one span; a cross-page or section chunk has one span per contributing page, in reading order. Note: when overlap > 0, spans of adjacent chunks intentionally overlap.",
+      "properties": {
+        "page_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0-based physical page index. Foreign key to PageRecord.page_index."
+        },
+        "page_label": {
+          "type": ["string", "null"],
+          "description": "Printed page label copied from PageRecord.page_label (e.g. 'iv', 'A-2'). Null if the PDF defines no labels. Prefer this (falling back to page_index+1) when rendering citations."
+        },
+        "char_start": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Inclusive start offset into PageRecord.text."
+        },
+        "char_end": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Exclusive end offset into PageRecord.text. Must be >= char_start."
+        }
+      },
+      "required": ["page_index", "page_label", "char_start", "char_end"],
+      "additionalProperties": false
+    },
+
+    "SourceDoc": {
+      "type": "object",
+      "description": "Citation-ready document metadata copied from the DocumentRecord, so the embedding/retrieval stage does not need to re-join against the document table.",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "DocumentRecord.metadata.Title. May be an empty string."
+        },
+        "source_path": {
+          "type": "string",
+          "description": "DocumentRecord.source_path (original PDF path or URI)."
+        }
+      },
+      "required": ["title", "source_path"],
+      "additionalProperties": false
+    },
+
+    "ChunkRecord": {
+      "type": "object",
+      "description": "One embeddable unit. The 'text' field is the exact string to embed.",
+      "properties": {
+        "record_type":    { "type": "string", "enum": ["chunk"] },
+        "schema_version": { "type": "string", "enum": ["1.0.0"] },
+        "chunk_id": {
+          "type": "string",
+          "pattern": "^.+::c[0-9]{4,}$",
+          "description": "Stable ID: '{doc_id}::c{NNNN}' where NNNN is chunk_index zero-padded to at least 4 digits. Unique within a run; stable across reruns with identical input and config."
+        },
+        "doc_id": {
+          "type": "string",
+          "description": "Foreign key to DocumentRecord.doc_id."
+        },
+        "chunk_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0-based position of this chunk within the document, in reading order."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The chunk content. This exact string is the embedding input."
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["page", "fixed-size", "recursive", "section", "sentence"],
+          "description": "Strategy that produced this chunk."
+        },
+        "token_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of tokens in 'text' measured with 'tokenizer_model', excluding special tokens (no CLS/SEP/BOS/EOS)."
+        },
+        "tokenizer_model": {
+          "type": "string",
+          "description": "HF Hub repo id or local path of the tokenizer used for budgeting and counting, e.g. 'BAAI/bge-small-en-v1.5'."
+        },
+        "spans": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/SourceSpan" },
+          "description": "Provenance: where in the source pages this chunk's text came from, in reading order. Single-element for within-page chunks."
+        },
+        "section_path": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered TOC ancestry of the chunk's starting position, outermost first, e.g. ['Chapter 3', '3.2 Methods']. Empty array if the document has no TOC or the chunk precedes the first TOC entry."
+        },
+        "source_doc": { "$ref": "#/$defs/SourceDoc" }
+      },
+      "required": [
+        "record_type", "schema_version", "chunk_id", "doc_id", "chunk_index",
+        "text", "strategy", "token_count", "tokenizer_model", "spans",
+        "section_path", "source_doc"
+      ],
+      "additionalProperties": false
+    },
+
+    "SkippedPage": {
+      "type": "object",
+      "description": "A page that produced no chunks, with the reason, so a side process (e.g. OCR) can fill the gap and the run can be repeated.",
+      "properties": {
+        "doc_id":     { "type": "string" },
+        "page_index": { "type": "integer", "minimum": 0 },
+        "reason": {
+          "type": "string",
+          "enum": ["needs_ocr", "empty_text", "invalid_record"],
+          "description": "needs_ocr: page flagged needs_ocr=true and --on-ocr-needed=skip. empty_text: page text was empty/whitespace-only. invalid_record: input line failed schema validation (non-strict mode)."
+        }
+      },
+      "required": ["doc_id", "page_index", "reason"],
+      "additionalProperties": false
+    },
+
+    "ManifestRecord": {
+      "type": "object",
+      "description": "Run provenance. Exactly one per output file, written as the LAST line (it aggregates totals). Lets stage 3 and future-you reproduce or audit the run.",
+      "properties": {
+        "record_type":    { "type": "string", "enum": ["manifest"] },
+        "schema_version": { "type": "string", "enum": ["1.0.0"] },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UTC timestamp of the run, RFC 3339."
+        },
+        "tool": {
+          "type": "object",
+          "properties": {
+            "name":    { "type": "string", "enum": ["chunker"] },
+            "version": { "type": "string", "description": "Package version of the chunker." }
+          },
+          "required": ["name", "version"],
+          "additionalProperties": false
+        },
+        "config": {
+          "type": "object",
+          "description": "The effective configuration of the run (after defaults were applied).",
+          "properties": {
+            "strategy":         { "type": "string", "enum": ["page", "fixed-size", "recursive", "section", "sentence"] },
+            "max_tokens":       { "type": "integer", "minimum": 1 },
+            "overlap":          { "type": "integer", "minimum": 0 },
+            "min_chunk_tokens": { "type": "integer", "minimum": 0 },
+            "tokenizer_model":  { "type": "string" },
+            "cross_page":       { "type": "boolean" },
+            "on_ocr_needed":    { "type": "string", "enum": ["skip", "include", "error"] },
+            "strict":           { "type": "boolean" }
+          },
+          "required": [
+            "strategy", "max_tokens", "overlap", "min_chunk_tokens",
+            "tokenizer_model", "cross_page", "on_ocr_needed", "strict"
+          ],
+          "additionalProperties": false
+        },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "documents_seen":  { "type": "integer", "minimum": 0 },
+            "pages_seen":      { "type": "integer", "minimum": 0 },
+            "pages_chunked":   { "type": "integer", "minimum": 0 },
+            "chunks_written":  { "type": "integer", "minimum": 0 },
+            "invalid_lines":   { "type": "integer", "minimum": 0 }
+          },
+          "required": ["documents_seen", "pages_seen", "pages_chunked", "chunks_written", "invalid_lines"],
+          "additionalProperties": false
+        },
+        "skipped_pages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SkippedPage" }
+        }
+      },
+      "required": ["record_type", "schema_version", "created_at", "tool", "config", "stats", "skipped_pages"],
+      "additionalProperties": false
+    }
+  }
+}
