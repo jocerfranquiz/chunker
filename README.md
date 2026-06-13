@@ -185,7 +185,7 @@ Given the same input file, the same `ChunkingConfig`, and the same
 across runs. The CLI/tool fill in `created_at` from the wall clock; library
 callers can pin it explicitly for caching or content-addressed pipelines.
 
-## Non-goals (v1)
+## Non-goals
 
 * **Embedding** — out of scope; emit chunks, hand to your embedder.
 * **Image and caption chunks** — owned by the image tool in a separate stage.
